@@ -1,3 +1,7 @@
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Url {
     url: String,
@@ -74,8 +78,6 @@ impl Url {
             .trim_start_matches("http://")
             .splitn(2, "/")
             .collect();
-
-        println!("{:?}", url_parts);
     
         if let Some(index) = url_parts[0].find(':') {
             url_parts[0][index + 1..].to_string()
