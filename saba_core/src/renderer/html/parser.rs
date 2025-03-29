@@ -8,9 +8,10 @@ use crate::renderer::html::token::HtmlTokenizer;
 use crate::renderer::html::token::HtmlToken;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use alloc::string::String;
 use core::cell::RefCell;
+use core::str::FromStr;
 
-use super::attribute;
 
 #[derive(Debug, Clone)]
 pub struct HtmlParser {
@@ -60,6 +61,93 @@ impl HtmlParser {
             }
 
             last_sibiling
+                .as_ref()
+                .unwrap()
+                .borrow_mut()
+                .set_next_sibling(Some(node.clone()));
+            node.borrow_mut().set_previous_sibling(Rc::downgrade(
+                &last_sibiling.expect("last_sibling should be Some")
+            ))
+        } else {
+            current.borrow_mut().set_first_child(Some(node.clone()));
+        }
+
+        current.borrow_mut().set_last_child(Rc::downgrade(&node));
+        node.borrow_mut().set_parent(Rc::downgrade(&current));
+
+        self.stack_of_open_elements.push(node);
+    }
+
+    fn pop_current_node(&mut self, element_kind: ElementKind) -> bool {
+        let current = match self.stack_of_open_elements.last() {
+            Some(n) => n,
+            None => return false,
+        };
+
+        if current.borrow().element_kind() == Some(element_kind) {
+            self.stack_of_open_elements.pop();
+            return true;
+        }
+
+        return false;
+    }
+
+    fn pop_until(&mut self, element_kind: ElementKind) {
+        assert!(
+            self.contain_in_stack(element_kind),
+            "stack doesn't have an element {:?}",
+            element_kind,
+        );
+
+        loop {
+            let current = match self.stack_of_open_elements.pop() {
+                Some(n) => n,
+                None => return,
+            };
+
+            if current.borrow().element_kind() == Some(element_kind) {
+                return;
+            }
+        }
+    }
+
+    fn contain_in_stack(&mut self, element_kind: ElementKind) -> bool {
+        for i in 0..self.stack_of_open_elements.len() {
+            if self.stack_of_open_elements[i].borrow().element_kind() == Some(element_kind) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn create_char(&self, c: char) -> Node {
+        let mut s = String::new();
+        s.push(c);
+        Node::new(NodeKind::Text(s))
+    }
+
+    fn insert_char(&mut self, c: char) {
+        let current = match self.stack_of_open_elements.last() {
+            Some(n) => n,
+            None => return,
+        };
+
+        if let NodeKind::Text(ref mut s) = current.borrow_mut().kind {
+            s.push(c);
+            return;
+        }
+
+        if c == '\n' || c == ' ' {
+            return;
+        }
+
+        let node = Rc::new(RefCell::new(self.create_char(c)));
+
+        if current.borrow().first_child().is_some() {
+            current
+                .borrow()
+                .first_child()
                 .unwrap()
                 .borrow_mut()
                 .set_next_sibling(Some(node.clone()));
@@ -67,10 +155,10 @@ impl HtmlParser {
                 &current
                     .borrow()
                     .first_child()
-                    .expect("failed to get a first child"), 
-            ))
+                    .expect("failed to get a first child")
+            ));
         } else {
-            current.borrow().set_first_child(Some(node.clone()));
+            current.borrow_mut().set_first_child(Some(node.clone()));
         }
 
         current.borrow_mut().set_last_child(Rc::downgrade(&node));
@@ -103,12 +191,18 @@ impl HtmlParser {
                         }
                         Some(HtmlToken::StartTag{
                             ref tag,
-                            self_closing,
+                            self_closing: _,
                             ref attributes,
                         }) => {
                             if tag == "html" {
                                 self.insert_element(tag, attributes.to_vec());
                                 self.mode = InsertionMode::BeforeHead;
+                                token = self.t.next();
+                                continue;
+                            }
+                        }
+                        Some(HtmlToken::EndTag { ref tag }) => {
+                            if tag != "head" || tag != "body" || tag != "html" || tag != "br" {
                                 token = self.t.next();
                                 continue;
                             }
@@ -132,7 +226,7 @@ impl HtmlParser {
                         }
                         Some(HtmlToken::StartTag{
                             ref tag,
-                            self_closing,
+                            self_closing: _,
                             ref attributes
                         }) => {
                             if tag == "head" {
@@ -155,13 +249,14 @@ impl HtmlParser {
                     match token {
                         Some(HtmlToken::Char(c)) => {
                             if c == ' ' || c == '\n' {
-                                self.t.next();
+                                self.insert_char(c);
+                                token = self.t.next();
                                 continue;
                             }
                         }
                         Some(HtmlToken::StartTag{
                             ref tag,
-                            self_closing,
+                            self_closing: _,
                             ref attributes,
                         }) => {
                             if tag == "style" || tag == "script" {
@@ -208,7 +303,7 @@ impl HtmlParser {
                         }
                         Some(HtmlToken::StartTag{
                             ref tag,
-                            self_closing,
+                            self_closing: _,
                             ref attributes,
                         }) => {
                             if tag == "body" {
@@ -229,6 +324,30 @@ impl HtmlParser {
                 }
                 InsertionMode::InBody => {
                     match token {
+                        Some(HtmlToken::StartTag{
+                            ref tag,
+                            self_closing: _,
+                            ref attributes,
+                        }) => match tag.as_str() {
+                            "p" => {
+                                self.insert_element(tag, attributes.to_vec());
+                                token = self.t.next();
+                                continue;
+                            }
+                            "h1" | "h2" => {
+                                self.insert_element(tag, attributes.to_vec());
+                                token = self.t.next();
+                                continue;
+                            }
+                            "a" => {
+                                self.insert_element(tag, attributes.to_vec());
+                                token = self.t.next();
+                                continue;
+                            }
+                            _ => {
+                                token = self.t.next();
+                            }
+                        }
                         Some(HtmlToken::EndTag { ref tag }) => {
                             match tag.as_str() {
                                 "body" => {
@@ -237,7 +356,7 @@ impl HtmlParser {
                                     if !self.contain_in_stack(ElementKind::Body) {
                                         continue;
                                     }
-                                    self.pop_untile(ElementKind::Body);
+                                    self.pop_until(ElementKind::Body);
                                     continue;
                                 }
                                 "html" => {
@@ -249,15 +368,37 @@ impl HtmlParser {
                                     }
                                     continue;
                                 }
+                                "p" => {
+                                    let element_kind = ElementKind::from_str(tag).expect("faied to convert string to ElementKind");
+                                    token = self.t.next();
+                                    self.pop_until(element_kind);
+                                    continue;
+                                }
+                                "h1" | "h2" => {
+                                    let element_kind = ElementKind::from_str(tag).expect("faieled to convert string to ElementKind");
+                                    token = self.t.next();
+                                    self.pop_until(element_kind);
+                                    continue;
+                                }
+                                "a" => {
+                                    let element_kind = ElementKind::from_str(tag).expect("failed to convert string to ElementKind");
+                                    token = self.t.next();
+                                    self.pop_until(element_kind);
+                                    continue;
+                                }
                                 _ => {
                                     token = self.t.next();
                                 }
                             }
                         }
+                        Some(HtmlToken::Char(c)) => {
+                            self.insert_char(c);
+                            token = self.t.next();
+                            continue;
+                        }
                         Some(HtmlToken::Eof) | None => {
                             return self.window.clone();
                         }
-                        _ => {}
                     }
                 }
                 InsertionMode::Text => {
@@ -291,7 +432,7 @@ impl HtmlParser {
                 }
                 InsertionMode::AfterBody => {
                     match token {
-                        Some(HtmlToken::Char(c)) => {
+                        Some(HtmlToken::Char(_c)) => {
                             token = self.t.next();
                             continue;
                         }
@@ -312,7 +453,7 @@ impl HtmlParser {
                 }
                 InsertionMode::AfterAfterBody => {
                     match token {
-                        Some(HtmlToken::Char(c)) => {
+                        Some(HtmlToken::Char(_c)) => {
                             token = self.t.next();
                             continue;
                         }
@@ -342,4 +483,187 @@ pub enum InsertionMode {
     Text,
     AfterBody,
     AfterAfterBody,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::renderer::html::token::HtmlTokenizer;
+    use super::*;
+    use crate::alloc::string::ToString;
+    use alloc::vec;
+
+    use super::HtmlParser;
+
+    #[test]
+    fn test_empty() {
+        let html = "".to_string();
+        let t = HtmlTokenizer::new(html);
+        let window = HtmlParser::new(t).construct_tree();
+        let expected = Rc::new(RefCell::new(Node::new(NodeKind::Document)));
+
+        assert_eq!(expected, window.borrow().document());
+    }
+
+    #[test]
+    fn test_body() {
+        let html = "<html><head></head><body></body></html>".to_string();
+        let t = HtmlTokenizer::new(html);
+        let window = HtmlParser::new(t).construct_tree();
+        let document = window.borrow().document();
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Document))),
+            document,
+        );
+
+        let html = document
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "html",
+                Vec::new(),
+            ))))),
+            html,
+        );
+
+        let head = html
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of html");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "head",
+                Vec::new(),
+            ))))),
+            head,
+        );
+
+        let body = head
+                .borrow()
+                .next_sibling()
+                .expect("failed to get a first child of head");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "body",
+                Vec::new(),
+            ))))),
+            body,
+        );
+    }
+
+    #[test]
+    fn test_text() {
+        let html = "<html><head></head><body>text</body></html>".to_string();
+        let t = HtmlTokenizer::new(html);
+        let window = HtmlParser::new(t).construct_tree();
+        let document = window.borrow().document();
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Document))),
+            document,
+        );
+
+        let html = document
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "html",
+                Vec::new(),
+            ))))),
+            html,
+        );
+
+        let body = html
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document")
+                .borrow()
+                .next_sibling()
+                .expect("failed to get a next sibling of head");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "body",
+                Vec::new(),
+            ))))),
+            body
+        );
+
+        let text = body
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Text("text".to_string())))),
+            text,
+        );
+    }
+
+    #[test]
+    fn test_multiple_nodes() {
+        let html = "<html><head></head><body><p><a foo=bar>text</a></p></body></html>".to_string();
+        let t = HtmlTokenizer::new(html);
+        let window = HtmlParser::new(t).construct_tree();
+        let document = window.borrow().document();
+
+        let body = document
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document")
+                .borrow()
+                .first_child()
+                .expect("failed to get a first child of document")
+                .borrow()
+                .next_sibling()
+                .expect("failed to get a next sibling of head");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "body",
+                Vec::new(),
+            ))))),
+            body
+        );
+
+        let p = body
+            .borrow()
+            .first_child()
+            .expect("failed to get a first child of body");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "p",
+                Vec::new(),
+            ))))),
+            p
+        );
+
+        let mut attr = Attribute::new();
+        attr.add_char('f', true);
+        attr.add_char('o', true);
+        attr.add_char('o', true);
+        attr.add_char('b', false);
+        attr.add_char('a', false);
+        attr.add_char('r', false);
+        let a = p
+            .borrow()
+            .first_child()
+            .expect("failed to get a first child of p");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Element(Element::new(
+                "a",
+                vec![attr],
+            ))))),
+            a
+        );
+
+        let text = a
+            .borrow()
+            .first_child()
+            .expect("failed to get a first child of a");
+        assert_eq!(
+            Rc::new(RefCell::new(Node::new(NodeKind::Text("text".to_string())))),
+            text
+        )
+    }
+
 }
